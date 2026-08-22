@@ -7,14 +7,38 @@ import axios from 'axios'
 import { getToken, clearSession } from './session'
 
 /**
- * Where the API lives. Set VITE_API_URL at build time (it must include the
- * `/api` prefix, e.g. https://api.example.com/api). With no value we fall back
- * to the same-origin `/api` path, which the Vite dev server proxies to the
- * local backend — no localhost URL is ever baked into a production bundle.
+ * Where the API lives.
+ *
+ * The backend mounts every route under `/api` (`app.use('/api', routes)`), so
+ * the base URL must always end in exactly one `/api`. VITE_API_URL may be set
+ * to either form — with or without the suffix — and both normalise to the same
+ * thing, so a deploy can never end up calling `/auth/login` or `/api/api/...`:
+ *
+ *   https://host            -> https://host/api
+ *   https://host/           -> https://host/api
+ *   https://host/api        -> https://host/api
+ *   https://host/api/       -> https://host/api
+ *   (unset)                 -> /api   (same origin; proxied by the dev server)
+ *
+ * With no value we fall back to the same-origin `/api` path, which the Vite dev
+ * server proxies to the local backend — no localhost URL is ever baked into a
+ * production bundle.
  */
 const configuredApiUrl = (import.meta.env?.VITE_API_URL ?? '').trim()
 
-export const API_BASE_URL = (configuredApiUrl || '/api').replace(/\/+$/, '')
+/** Drop trailing slashes, then any trailing `/api` segments, then re-add one. */
+function normaliseApiBaseUrl(value) {
+  const trimmed = value.replace(/\/+$/, '').replace(/(\/api)+$/i, '')
+  return `${trimmed}/api`
+}
+
+export const API_BASE_URL = configuredApiUrl ? normaliseApiBaseUrl(configuredApiUrl) : '/api'
+
+// Non-secret diagnostic: makes a misconfigured VITE_API_URL obvious in the
+// production console. Never log tokens, credentials or environment secrets.
+if (typeof console !== 'undefined') {
+  console.info('[MediBridge] API base URL:', API_BASE_URL)
+}
 
 export const httpClient = axios.create({
   baseURL: API_BASE_URL,
