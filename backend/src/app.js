@@ -3,7 +3,7 @@
 const express = require('express');
 const cors = require('cors');
 
-const { env } = require('./config/env');
+const { corsOptions } = require('./config/cors');
 const routes = require('./routes');
 const { notFoundHandler, errorHandler } = require('./middleware/errorHandler');
 
@@ -20,17 +20,16 @@ function createApp() {
   app.set('trust proxy', 1);
   app.disable('x-powered-by');
 
-  app.use(
-    cors({
-      origin(origin, callback) {
-        // Same-origin, curl and server-to-server calls send no Origin header.
-        if (!origin) return callback(null, true);
-        if (env.clientUrls.includes(origin)) return callback(null, true);
-        return callback(new Error(`Origin ${origin} is not allowed by the MediBridge CORS policy.`));
-      },
-      credentials: true,
-    })
-  );
+  // CORS first: it must run before body parsing, routing and the 404 handler
+  // so that a preflight is answered rather than routed.
+  const corsMiddleware = cors(corsOptions);
+  app.use(corsMiddleware);
+
+  // Answer every preflight explicitly. `app.use(cors())` already short-circuits
+  // OPTIONS, but this guarantees an OPTIONS request can never fall through to
+  // notFoundHandler and come back as a 404 the browser reports as a CORS
+  // failure. The regexp form works on both Express 4 and 5.
+  app.options(/.*/, corsMiddleware);
 
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: true }));

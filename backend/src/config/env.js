@@ -40,10 +40,12 @@ const env = {
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
   bcryptSaltRounds: num('BCRYPT_SALT_ROUNDS', 10),
 
-  // Comma separated list -> array. Used by the CORS allow-list.
+  // Comma separated list -> array. Used by the CORS allow-list. Trailing
+  // slashes are stripped here because a browser's Origin header never has one,
+  // and hosting dashboards routinely store the "https://host/" form.
   clientUrls: (process.env.CLIENT_URL || 'http://localhost:5173')
     .split(',')
-    .map((url) => url.trim())
+    .map((url) => url.trim().replace(/\/+$/, ''))
     .filter(Boolean),
 
   freshness: {
