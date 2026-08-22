@@ -4,7 +4,7 @@
  * Regression test for the exact production pairing:
  *
  *   frontend  https://medi-bridge-nine.vercel.app   (Vercel)
- *   API       https://medi-bridge-kpbl.onrender.com (Render, CLIENT_URL)
+ *   API       https://medi-bridge-kpb1.onrender.com (Render, CLIENT_URL)
  *
  * Chrome preflights the login POST because it carries a JSON content type, so
  * OPTIONS /api/auth/login must answer 2xx with the right headers or the login
