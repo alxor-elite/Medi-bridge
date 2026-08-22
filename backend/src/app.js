@@ -37,6 +37,22 @@ function createApp() {
 
   app.use('/api', routes);
 
+  /**
+   * Root banner. The whole API lives under /api; this exists so that hitting
+   * the bare host proves the Express app is actually serving. A platform-level
+   * 404 (Render's plain-text "Not Found") then means the service is not
+   * running, rather than a route being wrong.
+   */
+  app.get('/', (req, res) => {
+    res.status(200).json({
+      service: 'MediBridge API',
+      status: 'ok',
+      apiRoot: '/api',
+      health: '/api/health',
+      docs: 'See backend/API.md',
+    });
+  });
+
   app.use(notFoundHandler);
   app.use(errorHandler);
 

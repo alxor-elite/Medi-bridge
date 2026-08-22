@@ -32,9 +32,11 @@ async function start() {
   const app = createApp();
 
   const server = app.listen(env.port, () => {
-    console.log(`[medibridge] API listening on http://localhost:${env.port}`);
+    console.log(`[medibridge] API listening on port ${env.port}`);
     console.log(`[medibridge] environment: ${env.nodeEnv} | database driver: ${db.name}`);
-    console.log(`[medibridge] health check: http://localhost:${env.port}/api/health`);
+    console.log(`[medibridge] health check: /api/health | api root: /api`);
+    // Public origins only - never log keys, secrets or connection strings.
+    console.log(`[medibridge] CORS allow-list: ${env.clientUrls.join(', ')}`);
   });
 
   // Reservations must not hold stock hostage after they expire.
@@ -55,6 +57,9 @@ async function start() {
 }
 
 start().catch((error) => {
+  // Printed in full: on a hosted deploy these lines are the only clue as to
+  // why the process exited before it ever bound to a port.
   console.error('[medibridge] failed to start:', error.message);
+  if (error.stack) console.error(error.stack);
   process.exit(1);
 });
