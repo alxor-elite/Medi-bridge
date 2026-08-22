@@ -27,7 +27,7 @@ import { formatDistance, formatEta } from '../../lib/format'
 export default function Dashboard() {
   const navigate = useNavigate()
   const { user } = useAuth()
-  const orgId = user?.org?.id || 'org-city-general'
+  const orgId = user?.orgId || null
 
   const { data, loading } = useAsync(() => hospitalsApi.getDashboard(orgId), [orgId])
   const { data: nearby, loading: nearbyLoading } = useAsync(() => hospitalsApi.nearbySuppliers(5), [])

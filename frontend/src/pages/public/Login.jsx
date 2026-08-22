@@ -1,11 +1,10 @@
 import { useState } from 'react'
 import { useNavigate, useLocation, Link } from 'react-router-dom'
-import { Hospital, Store, ShieldCheck, Mail, Lock, LogIn } from 'lucide-react'
+import { Hospital, Store, ShieldCheck, Mail, Lock, LogIn, AlertCircle } from 'lucide-react'
 import { AuthLayout } from '../../components/layout/AuthLayout'
 import { Field, Input } from '../../components/ui/Input'
 import { Button } from '../../components/ui/Button'
 import { useAuth } from '../../context/auth'
-import { authApi } from '../../api'
 import { ROLES } from '../../lib/constants'
 import { ROLE_HOME } from '../../components/layout/navConfig'
 import { cn } from '../../lib/cn'
@@ -26,15 +25,25 @@ export default function Login() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [submitting, setSubmitting] = useState(false)
-
-  const demoEmail = authApi.demoUser(role)?.email || ''
+  const [error, setError] = useState('')
 
   async function handleSubmit(e) {
     e.preventDefault()
+    setError('')
+
+    if (!email.trim() || !password) {
+      setError('Enter your email address and password.')
+      return
+    }
+
     setSubmitting(true)
     try {
-      await login(role)
-      navigate(from || ROLE_HOME[role], { replace: true })
+      // The backend verifies the credentials; the role buttons above only say
+      // which dashboard the visitor expects, they never grant access.
+      const user = await login({ email: email.trim(), password, role })
+      navigate(from || ROLE_HOME[user.role] || '/', { replace: true })
+    } catch (err) {
+      setError(err.message || 'Invalid email or password.')
     } finally {
       setSubmitting(false)
     }
@@ -43,7 +52,7 @@ export default function Login() {
   return (
     <AuthLayout
       title="Log in to MediBridge"
-      subtitle="Choose a role to explore the demo. Any email and password will work."
+      subtitle="Sign in with your MediBridge account credentials."
       footer={
         <>
           New organization?{' '}
@@ -53,7 +62,7 @@ export default function Login() {
         </>
       }
     >
-      <form onSubmit={handleSubmit} className="space-y-5">
+      <form onSubmit={handleSubmit} className="space-y-5" noValidate>
         <fieldset>
           <legend className="mb-2 block text-sm font-medium text-slate-700">I am a…</legend>
           <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Role">
@@ -84,13 +93,23 @@ export default function Login() {
           </div>
         </fieldset>
 
+        {error && (
+          <p
+            role="alert"
+            className="flex items-start gap-2 rounded-xl border border-danger-200 bg-danger-50 px-3.5 py-3 text-sm font-medium text-danger-700"
+          >
+            <AlertCircle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            {error}
+          </p>
+        )}
+
         <Field label="Email" htmlFor="email">
           <Input
             id="email"
             type="email"
             leftIcon={Mail}
             value={email}
-            placeholder={demoEmail}
+            placeholder="you@organization.com"
             autoComplete="username"
             onChange={(e) => setEmail(e.target.value)}
           />

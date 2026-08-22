@@ -21,6 +21,11 @@ import { hospitalsApi } from '../../api'
 import { ORG_TYPES } from '../../lib/constants'
 import { formatDate, initials } from '../../lib/format'
 
+/** Join whichever location parts the organization actually has. */
+function orgLocation(org) {
+  return [org.address || org.area, org.city].filter(Boolean).join(', ') || null
+}
+
 function Detail({ icon: Icon, label, value }) {
   if (!value && value !== 0) return null
   return (
@@ -37,7 +42,16 @@ function Detail({ icon: Icon, label, value }) {
 export default function Profile() {
   const { user, logout } = useAuth()
   const navigate = useNavigate()
-  const { data: org, loading } = useAsync(() => hospitalsApi.getHome(), [])
+
+  // The authenticated organization comes from the session (/auth/me); the
+  // demo dataset is only consulted when the account has no organization.
+  const sessionOrg = user?.org || null
+  const { data: fallbackOrg, loading: fallbackLoading } = useAsync(
+    () => (sessionOrg ? Promise.resolve(null) : hospitalsApi.getHome()),
+    [sessionOrg?.id],
+  )
+  const org = sessionOrg || fallbackOrg
+  const loading = sessionOrg ? false : fallbackLoading
 
   async function signOut() {
     await logout()
@@ -78,7 +92,7 @@ export default function Profile() {
             <div className="grid gap-5 sm:grid-cols-2">
               <Detail icon={Building2} label="Name" value={org.name} />
               <Detail icon={Building2} label="Type" value={ORG_TYPES[org.type]} />
-              <Detail icon={MapPin} label="Address" value={`${org.address || org.area}, ${org.city}`} />
+              <Detail icon={MapPin} label="Address" value={orgLocation(org)} />
               <Detail icon={FileCheck2} label="License" value={org.license} />
               <Detail icon={Phone} label="Phone" value={org.phone} />
               <Detail icon={Mail} label="Email" value={org.email} />

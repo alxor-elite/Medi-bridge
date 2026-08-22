@@ -22,7 +22,7 @@ import { suppliersApi, ordersApi } from '../../api'
 
 export default function Dashboard() {
   const { user } = useAuth()
-  const orgId = user?.org?.id || 'org-medplus'
+  const orgId = user?.orgId || null
   const { data, loading, run } = useAsync(() => suppliersApi.getDashboard(orgId), [orgId])
   const [busyId, setBusyId] = useState(null)
 

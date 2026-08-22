@@ -83,7 +83,7 @@ function RequestCard({ request, busy, onRespond }) {
 
 export default function EmergencyRequests() {
   const { user } = useAuth()
-  const orgId = user?.org?.id || 'org-medplus'
+  const orgId = user?.orgId || null
   const { data: requests, loading, error, run, setData } = useAsync(
     () => suppliersApi.listEmergencyRequests(orgId),
     [orgId],

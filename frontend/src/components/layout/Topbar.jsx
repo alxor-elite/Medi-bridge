@@ -5,7 +5,6 @@ import {
   Bell,
   ChevronDown,
   LogOut,
-  Repeat2,
   Truck,
   ClipboardList,
   Boxes,
@@ -30,7 +29,7 @@ const NTF_ICONS = {
 }
 
 export function Topbar({ onOpenMenu }) {
-  const { user, login, logout } = useAuth()
+  const { user, logout } = useAuth()
   const navigate = useNavigate()
   const [menu, setMenu] = useState(null) // 'ntf' | 'user' | null
 
@@ -38,18 +37,10 @@ export function Topbar({ onOpenMenu }) {
   const notifications = data || []
   const unread = notifications.filter((n) => !n.read).length
 
-  const otherRoles = Object.values(ROLES).filter((r) => r !== user?.role)
-
-  async function switchRole(role) {
-    setMenu(null)
-    await login(role)
-    navigate(ROLE_HOME[role])
-  }
-
   async function handleLogout() {
     setMenu(null)
     await logout()
-    navigate('/')
+    navigate('/login')
   }
 
   return (
@@ -161,24 +152,11 @@ export function Topbar({ onOpenMenu }) {
               <div className="border-b border-slate-100 px-4 py-3">
                 <p className="text-sm font-semibold text-slate-900">{user?.name}</p>
                 <p className="truncate text-xs text-slate-500">{user?.email}</p>
+                {user?.org?.name && (
+                  <p className="mt-1 truncate text-xs text-slate-400">{user.org.name}</p>
+                )}
               </div>
               <div className="py-1">
-                <p className="px-4 pb-1 pt-2 text-xs font-medium uppercase tracking-wide text-slate-400">
-                  Switch demo role
-                </p>
-                {otherRoles.map((role) => (
-                  <button
-                    key={role}
-                    type="button"
-                    onClick={() => switchRole(role)}
-                    className="flex w-full items-center gap-2 px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
-                  >
-                    <Repeat2 className="size-4 text-slate-400" />
-                    {ROLE_LABEL[role]}
-                  </button>
-                ))}
-              </div>
-              <div className="border-t border-slate-100 py-1">
                 <button
                   type="button"
                   onClick={handleLogout}

@@ -64,7 +64,7 @@ export default function CreateOrder() {
         quantity: qtyNum,
       })
       const order = await ordersApi.create({
-        hospitalId: user?.org?.id || 'org-city-general',
+        hospitalId: user?.orgId || null,
         supplierId,
         priority,
         etaMinutes: supplier.etaMinutes ?? null,

@@ -21,7 +21,7 @@ const FILTERS = [
 
 export default function IncomingOrders() {
   const { user } = useAuth()
-  const orgId = user?.org?.id || 'org-medplus'
+  const orgId = user?.orgId || null
   const { data: orders, loading, error, run } = useAsync(() => ordersApi.listForSupplier(orgId), [orgId])
   const [filter, setFilter] = useState('all')
   const [busyId, setBusyId] = useState(null)

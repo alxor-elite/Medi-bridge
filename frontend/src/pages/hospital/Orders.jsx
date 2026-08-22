@@ -23,7 +23,7 @@ const FILTERS = [
 
 export default function Orders() {
   const { user } = useAuth()
-  const orgId = user?.org?.id || 'org-city-general'
+  const orgId = user?.orgId || null
   const { data: orders, loading, error, run } = useAsync(() => ordersApi.listForHospital(orgId), [orgId])
   const [filter, setFilter] = useState('all')
 
