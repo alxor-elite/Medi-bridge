@@ -15,7 +15,9 @@ process.env.NODE_ENV = process.env.NODE_ENV || 'test';
 process.env.DB_DRIVER = 'memory';
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-that-is-definitely-long-enough-32';
 process.env.BCRYPT_SALT_ROUNDS = process.env.BCRYPT_SALT_ROUNDS || '4'; // Fast, tests do not need cost.
-process.env.CLIENT_URL = 'http://localhost:5173';
+// A test file may pin its own allow-list before requiring this module - see
+// cors.production-origin.test.js, which exercises the real deployed origin.
+process.env.CLIENT_URL = process.env.CLIENT_URL || 'http://localhost:5173';
 
 const { validateEnv } = require('../src/config/env');
 const { createApp } = require('../src/app');
