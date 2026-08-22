@@ -1,0 +1,111 @@
+/** Role-scoped notifications. `minsAgo` becomes a timestamp in the API layer. */
+
+export const NOTIFICATIONS = [
+  // Hospital
+  {
+    id: 'ntf-h1',
+    role: 'hospital',
+    type: 'delivery',
+    title: 'Order MB-2481 is out for delivery',
+    body: 'Adrenaline 1mg ×20 from MedPlus — ETA 7 min.',
+    minsAgo: 6,
+    read: false,
+    href: '/hospital/orders/ord-2481',
+  },
+  {
+    id: 'ntf-h2',
+    role: 'hospital',
+    type: 'order',
+    title: 'Hopewell accepted your request',
+    body: 'Noradrenaline 4mg ×15 confirmed by MedPlus.',
+    minsAgo: 4,
+    read: false,
+    href: '/hospital/orders',
+  },
+  {
+    id: 'ntf-h3',
+    role: 'hospital',
+    type: 'stock',
+    title: 'Stock alert cleared',
+    body: 'Ceftriaxone 1g back above threshold at 3 nearby suppliers.',
+    minsAgo: 52,
+    read: true,
+    href: '/hospital/search',
+  },
+  {
+    id: 'ntf-h4',
+    role: 'hospital',
+    type: 'delivery',
+    title: 'Order MB-2470 delivered',
+    body: 'Ceftriaxone 1g ×80 signed by ward pharmacist.',
+    minsAgo: 1405,
+    read: true,
+    href: '/hospital/orders/ord-2470',
+  },
+  // Supplier
+  {
+    id: 'ntf-s1',
+    role: 'supplier',
+    type: 'order',
+    title: 'New critical request — ER-901',
+    body: 'City General needs Adrenaline 1mg ×20 within 15 min.',
+    minsAgo: 3,
+    read: false,
+    href: '/supplier/emergency',
+  },
+  {
+    id: 'ntf-s2',
+    role: 'supplier',
+    type: 'stock',
+    title: 'Out of stock: Ringer Lactate 500mL',
+    body: 'Batch RL-2312-J depleted. Update stock to keep receiving orders.',
+    minsAgo: 63,
+    read: false,
+    href: '/supplier/inventory',
+  },
+  {
+    id: 'ntf-s3',
+    role: 'supplier',
+    type: 'stock',
+    title: 'Expiring soon: Insulin 100 IU',
+    body: '16 vials expire in 39 days.',
+    minsAgo: 120,
+    read: true,
+    href: '/supplier/inventory',
+  },
+  // Admin
+  {
+    id: 'ntf-a1',
+    role: 'admin',
+    type: 'verification',
+    title: '3 organizations awaiting verification',
+    body: 'NewLife Pharmacy, Metro Medicals, QuickMed Distributors.',
+    minsAgo: 20,
+    read: false,
+    href: '/admin/verification',
+  },
+  {
+    id: 'ntf-a2',
+    role: 'admin',
+    type: 'system',
+    title: 'Freshness SLA breach',
+    body: 'Old Town Chemists breached inventory freshness SLA (4×).',
+    minsAgo: 180,
+    read: false,
+    href: '/admin/organizations/org-oldtown-chem',
+  },
+  {
+    id: 'ntf-a3',
+    role: 'admin',
+    type: 'order',
+    title: 'Emergency order volume up 18%',
+    body: 'Active critical orders above weekly average.',
+    minsAgo: 240,
+    read: true,
+    href: '/admin/orders',
+  },
+]
+
+export function notificationsForRole(role) {
+  return NOTIFICATIONS.filter((n) => n.role === role)
+}
