@@ -4,6 +4,7 @@ import {
   ClipboardList,
   Map,
   Bell,
+  Sparkles,
   Building2,
   Boxes,
   Inbox,
@@ -21,6 +22,7 @@ export const HOSPITAL_NAV = [
   { to: '/hospital/orders', label: 'Orders', icon: ClipboardList },
   { to: '/hospital/map', label: 'Map', icon: Map },
   { to: '/hospital/notifications', label: 'Notifications', icon: Bell },
+  { to: '/hospital/assistant', label: 'Assistant', icon: Sparkles },
   { to: '/hospital/profile', label: 'Profile', icon: Building2 },
 ]
 

@@ -25,6 +25,7 @@ const HospitalOrders = lazy(() => import('./pages/hospital/Orders'))
 const HospitalOrderTracking = lazy(() => import('./pages/hospital/OrderTracking'))
 const HospitalNotifications = lazy(() => import('./pages/hospital/Notifications'))
 const HospitalProfile = lazy(() => import('./pages/hospital/Profile'))
+const HospitalAssistant = lazy(() => import('./pages/hospital/Assistant'))
 
 // Supplier
 const SupplierDashboard = lazy(() => import('./pages/supplier/Dashboard'))
@@ -79,6 +80,7 @@ export default function App() {
             <Route path="orders/:orderId" element={<HospitalOrderTracking />} />
             <Route path="map" element={<HospitalMap />} />
             <Route path="notifications" element={<HospitalNotifications />} />
+            <Route path="assistant" element={<HospitalAssistant />} />
             <Route path="profile" element={<HospitalProfile />} />
             <Route path="supplier/:supplierId" element={<HospitalSupplierDetails />} />
             <Route path="create-order" element={<HospitalCreateOrder />} />

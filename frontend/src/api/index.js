@@ -5,6 +5,7 @@ export { suppliersApi } from './suppliers'
 export { inventoryApi } from './inventory'
 export { ordersApi } from './orders'
 export { adminApi } from './admin'
+export { aiApi } from './ai'
 
 import { hospitalsApi } from './hospitals'
 import { suppliersApi } from './suppliers'
