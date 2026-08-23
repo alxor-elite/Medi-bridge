@@ -1,6 +1,7 @@
 'use strict';
 
 const aiService = require('../services/ai.service');
+const chatService = require('../services/chat.service');
 const searchService = require('../services/search.service');
 const asyncHandler = require('../utils/asyncHandler');
 const ApiError = require('../utils/ApiError');
@@ -71,4 +72,21 @@ const shortageForecast = asyncHandler(async (req, res) => {
   return sendSuccess(res, forecast);
 });
 
-module.exports = { parseRequest, emergencySearch, shortageForecast };
+/**
+ * POST /api/ai/chat
+ * The assistant endpoint the frontend talks to. Answers come from the primary
+ * MediBridge AI, or - only when that actually fails - from the Gemini
+ * fallback. Which one answered is decided here and nowhere else.
+ *
+ * This is the one endpoint that does not use sendSuccess(). The assistant's
+ * contract predates the { success, data } envelope and the frontend reads
+ * `response` from the top level, so the shape is preserved deliberately:
+ *
+ *   { "success": true, "response": "...", "provider": "local" }
+ */
+const chat = asyncHandler(async (req, res) => {
+  const { status, body } = await chatService.chat(req.body.message, req.user);
+  return res.status(status).json(body);
+});
+
+module.exports = { parseRequest, emergencySearch, shortageForecast, chat };

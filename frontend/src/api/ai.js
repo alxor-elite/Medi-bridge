@@ -1,63 +1,41 @@
 /**
  * MediBridge AI assistant.
  *
- * Talks to the FastAPI service, which is deployed separately from the Express
- * API and therefore gets its own axios instance rather than `httpClient`:
- * different host, no MediBridge JWT, and a much longer timeout because the
- * model can take upwards of 20 seconds to answer.
+ * Talks to the Express API rather than to the FastAPI service directly:
  *
- *   POST <VITE_AI_API_URL>/chat   { "message": "..." }
- *   -> { "success": true, "message": "...", "response": "..." }
+ *   POST <API_BASE_URL>/ai/chat   { "message": "..." }
+ *   -> { "success": true, "response": "..." }
+ *
+ * The backend calls the self-hosted LLM first and only reaches for a hosted
+ * fallback when that genuinely fails, so the provider key never has to exist
+ * in the browser. This file cannot tell which model answered, and should not:
+ * the shape above is identical either way.
+ *
+ * It still gets its own axios instance rather than reusing `httpClient`,
+ * because the assistant needs a far longer timeout than the 12s the CRUD API
+ * uses - the backend alone may spend 30s waiting on the primary model.
  */
 import axios from 'axios'
-import { apiErrorMessage } from './client'
-
-/**
- * Where the assistant lives: VITE_AI_API_URL, without a trailing `/chat`.
- *
- * The ngrok hostname changes every time the tunnel restarts, so it is never
- * hardcoded in a production bundle. `import.meta.env.DEV` is replaced with a
- * literal at build time, so the fallback below - and the URL inside it - is
- * dead code that the bundler drops from the production build entirely.
- * A production build without the variable set therefore has no base URL, and
- * says so rather than quietly calling a tunnel that has long since died.
- */
-const configuredAiUrl = (import.meta.env?.VITE_AI_API_URL ?? '').trim()
-
-function resolveAiBaseUrl() {
-  if (configuredAiUrl) return configuredAiUrl.replace(/\/+$/, '')
-
-  if (import.meta.env.DEV) {
-    // Local convenience only: `npm run dev` works with no configuration.
-    return 'https://pushpin-twins-dangle.ngrok-free.dev'
-  }
-
-  return ''
-}
-
-export const AI_BASE_URL = resolveAiBaseUrl()
-
-/** Message shown when a deployed build was never told where the service is. */
-const NOT_CONFIGURED =
-  'The AI assistant is not configured. Set VITE_AI_API_URL to the assistant URL and redeploy.'
+import { API_BASE_URL, apiErrorMessage } from './client'
+import { getToken } from './session'
 
 const aiClient = axios.create({
-  baseURL: AI_BASE_URL,
-  // The assistant answers in ~20s; the 12s used for the CRUD API is too short.
+  baseURL: `${API_BASE_URL}/ai`,
+  // Backend worst case is the 30s primary budget plus the fallback call.
   timeout: 60000,
-  headers: {
-    'Content-Type': 'application/json',
-    // Without this, ngrok's free tier serves browsers an HTML interstitial
-    // instead of the JSON payload.
-    'ngrok-skip-browser-warning': 'true',
-  },
+  headers: { 'Content-Type': 'application/json' },
+})
+
+// The assistant sits behind the same session as the rest of the API.
+aiClient.interceptors.request.use((config) => {
+  const token = getToken()
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
 })
 
 export const aiApi = {
   /** Sends one message and resolves with the assistant's reply text. */
   async chat(message) {
-    if (!AI_BASE_URL) throw new Error(NOT_CONFIGURED)
-
     const text = String(message ?? '').trim()
     if (!text) throw new Error('Enter a question for the assistant.')
 
@@ -69,7 +47,12 @@ export const aiApi = {
       if (error?.code === 'ECONNABORTED') {
         throw new Error('The assistant took too long to answer. Please try again.', { cause: error })
       }
-      // No response at all is usually the tunnel being down or a CORS refusal.
+      // When both providers are down the backend answers 503 with its own
+      // plain-language message at the top level - show that, not "status 503".
+      const serviceMessage = error?.response?.data?.message
+      if (typeof serviceMessage === 'string' && serviceMessage.trim()) {
+        throw new Error(serviceMessage, { cause: error })
+      }
       if (error?.request && !error?.response) {
         throw new Error('Cannot reach the MediBridge AI service. Check that the backend is running.', {
           cause: error,

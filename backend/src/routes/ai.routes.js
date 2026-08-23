@@ -11,6 +11,19 @@ const router = express.Router();
 
 router.use(requireAuth, requireVerifiedOrganization);
 
+/**
+ * The assistant. One endpoint for the frontend, two providers behind it -
+ * see services/chat.service.js. The 4000 character ceiling matches what the
+ * FastAPI service accepts.
+ */
+router.post(
+  '/chat',
+  [body('message').isString().trim().isLength({ min: 1, max: 4000 })
+    .withMessage('Enter a question for the assistant, up to 4000 characters.')],
+  validate,
+  controller.chat
+);
+
 router.post(
   '/parse-request',
   [body('text').isString().trim().isLength({ min: 3, max: 2000 })

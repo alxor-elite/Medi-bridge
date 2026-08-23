@@ -890,6 +890,49 @@ Requires a verified organisation.
 > It is a deterministic rule-based extractor: no API key, no external call, and
 > it cannot hallucinate a product that does not exist.
 
+### `POST /api/ai/chat`
+
+The assistant the frontend talks to. One endpoint, two providers behind it.
+
+**Body** `{ "message": "Do we have adrenaline?" }`
+
+**Response `200`**
+
+```json
+{
+  "success": true,
+  "response": "Yes — Adrenor 1mg/ml (Adrenaline), 160 units available.",
+  "provider": "local"
+}
+```
+
+The answer normally comes from the **primary**: the MediBridge FastAPI service
+in front of the self-hosted LLM (`AI_SERVICE_URL`), which has live tool access
+to the database. It is given `AI_PRIMARY_TIMEOUT_MS` (30s) to answer, because a
+slow answer is still the right answer.
+
+Only when the primary genuinely fails — unreachable, `5xx`, timeout, an
+inference exception, or an empty/unparseable body — does the request fall
+through to the **fallback**, Google Gemini (`GEMINI_API_KEY`, server-side
+only). The fallback has no tool access, so it is first handed a structured
+block of real rows read from the catalogue and inventory tables, and is
+instructed to state only figures that appear in that block. When no rows back
+the question it says it cannot verify live inventory rather than inventing one.
+
+A `4xx` from the primary is passed straight back — a rejected request is not an
+outage, and asking a second model would only hide the bug.
+
+`provider` is `"local"` or `"gemini_fallback"`. It is metadata for logs and
+support; the frontend does not surface it, and the response shape is identical
+either way.
+
+**Response `503`** — both providers failed. Exactly one attempt is made per
+provider, so the path is always primary → fallback → error, never a loop:
+
+```json
+{ "success": false, "message": "MediBridge AI is temporarily unavailable. Please try again shortly." }
+```
+
 ### `POST /api/ai/parse-request`
 
 **Body** `{ "text": "We urgently need 20 adrenaline injections within 30 minutes." }`
