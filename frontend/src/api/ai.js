@@ -13,16 +13,33 @@ import axios from 'axios'
 import { apiErrorMessage } from './client'
 
 /**
- * The ngrok hostname changes every time the tunnel restarts, so it is read
- * from the environment; the current tunnel is the default so the app works
- * without extra configuration.
+ * Where the assistant lives: VITE_AI_API_URL, without a trailing `/chat`.
+ *
+ * The ngrok hostname changes every time the tunnel restarts, so it is never
+ * hardcoded in a production bundle. `import.meta.env.DEV` is replaced with a
+ * literal at build time, so the fallback below - and the URL inside it - is
+ * dead code that the bundler drops from the production build entirely.
+ * A production build without the variable set therefore has no base URL, and
+ * says so rather than quietly calling a tunnel that has long since died.
  */
 const configuredAiUrl = (import.meta.env?.VITE_AI_API_URL ?? '').trim()
 
-export const AI_BASE_URL = (configuredAiUrl || 'https://pushpin-twins-dangle.ngrok-free.dev').replace(
-  /\/+$/,
-  '',
-)
+function resolveAiBaseUrl() {
+  if (configuredAiUrl) return configuredAiUrl.replace(/\/+$/, '')
+
+  if (import.meta.env.DEV) {
+    // Local convenience only: `npm run dev` works with no configuration.
+    return 'https://pushpin-twins-dangle.ngrok-free.dev'
+  }
+
+  return ''
+}
+
+export const AI_BASE_URL = resolveAiBaseUrl()
+
+/** Message shown when a deployed build was never told where the service is. */
+const NOT_CONFIGURED =
+  'The AI assistant is not configured. Set VITE_AI_API_URL to the assistant URL and redeploy.'
 
 const aiClient = axios.create({
   baseURL: AI_BASE_URL,
@@ -39,6 +56,8 @@ const aiClient = axios.create({
 export const aiApi = {
   /** Sends one message and resolves with the assistant's reply text. */
   async chat(message) {
+    if (!AI_BASE_URL) throw new Error(NOT_CONFIGURED)
+
     const text = String(message ?? '').trim()
     if (!text) throw new Error('Enter a question for the assistant.')
 

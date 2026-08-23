@@ -22,6 +22,19 @@ export default defineConfig(({ mode, command }) => {
           '            environment variables before deploying.',
       )
     }
+
+    // The AI assistant has no same-origin fallback: without this variable the
+    // Assistant page can only report that it is unconfigured.
+    const aiUrl = (env.VITE_AI_API_URL || '').trim()
+    if (aiUrl) {
+      console.log(`[medibridge] building against AI base URL: ${aiUrl.replace(/\/+$/, '')}`)
+    } else {
+      console.warn(
+        '[medibridge] WARNING: VITE_AI_API_URL is not set. The Assistant page will\n' +
+          '            report that the assistant is not configured. Set it to the\n' +
+          '            FastAPI service URL before deploying.',
+      )
+    }
   }
 
   return {
