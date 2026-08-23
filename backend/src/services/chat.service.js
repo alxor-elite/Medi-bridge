@@ -6,36 +6,38 @@ const { parseEmergencyRequest } = require('./ai.service');
 const { TABLES, ITEM_TYPES, VERIFICATION_STATUS } = require('../config/constants');
 
 /**
- * The assistant's /chat pipeline.
+ * The assistant behind POST /api/ai/chat.
  *
- * MediBridge's own AI - the self-hosted LLM behind the FastAPI service - is
- * and remains the primary. It is the only one with live tool access to the
- * database. This module exists so that a dead tunnel, a crashed model or an
- * inference exception does not leave a hospital staring at an error box during
- * an emergency.
+ * Gemini is the assistant. The self-hosted Qwen model behind the FastAPI
+ * tunnel is no longer in this path at all: a notebook that has to be running
+ * on someone's machine for a hospital to get an answer is not something to
+ * put in front of an emergency, and every production failure so far has been
+ * that tunnel rather than the model.
  *
- *   tryPrimaryAi(message)
- *     -> success: return it, untouched
- *     -> failure: tryDatabaseContext(message)
- *                 tryGeminiFallback(message, context)
- *                 -> failure: one clean "temporarily unavailable"
+ *   chat(message)
+ *     tryDatabaseContext(message)  - the live rows behind the question
+ *     askGemini(message, context)  - phrase them
+ *     -> failure: one clean "temporarily unavailable"
  *
- * Three rules govern the design:
+ * Two rules govern the design:
  *
- *  1. The path is strictly linear - primary, then fallback, then error. There
- *     is no retry and no route back into the primary, so a failing primary can
- *     never produce a loop: exactly one outbound call per provider per request.
- *  2. Slowness is not failure. The primary gets a full timeout budget to
- *     answer (AI_PRIMARY_TIMEOUT_MS, 30s by default) and only a real fault -
- *     unreachable, 5xx, timeout, inference error, empty or unparseable body -
- *     hands over to the fallback.
- *  3. The fallback never invents inventory. Gemini has no tool access, so it
- *     is handed a structured block of real database rows to speak from, and is
- *     instructed to say it cannot verify live inventory when that block is
- *     missing. See buildFallbackPrompt().
+ *  1. Exactly one outbound call per request. There is no retry and no second
+ *     provider, so the path is always context -> Gemini -> answer or error,
+ *     and it cannot loop.
+ *  2. Gemini never invents inventory. It has no tool access of its own, so it
+ *     is handed a structured block of real database rows to speak from, and
+ *     is told to say it cannot verify live inventory rather than produce a
+ *     number when that block is missing. See SYSTEM_INSTRUCTION.
+ *
+ * The response shape predates all of this and is unchanged - `success` and
+ * `response` at the top level - so the Assistant page needs no knowledge of
+ * which model answered.
+ *
+ * Restoring the self-hosted primary: the full two-provider pipeline, with its
+ * failure classification and tests, is in commit 84410ef.
  */
 
-/** The single message the frontend shows when neither provider can answer. */
+/** The single message the frontend shows when the assistant cannot answer. */
 const UNAVAILABLE_MESSAGE = 'MediBridge AI is temporarily unavailable. Please try again shortly.';
 
 /** Sentinel used when no database facts could be gathered for the question. */
@@ -46,10 +48,9 @@ const NO_CONTEXT =
  * Pipeline logging.
  *
  * These lines are operational, not debug. When the assistant fails on a
- * deployed instance they are the only record of which provider dropped the
- * request and why, so they are printed in production too - a silent pipeline
- * is exactly what makes a 503 impossible to diagnose from a hosting log.
- * Only the test run is quiet, to keep its output readable.
+ * deployed instance they are the only record of why, so they are printed in
+ * production too - a silent pipeline is what makes a 503 impossible to
+ * diagnose from a hosting log. Only the test run is quiet.
  *
  * Never pass a key, a token or a full prompt through here.
  */
@@ -59,98 +60,16 @@ function log(line) {
 }
 
 /* -------------------------------------------------------------------------
- * 1. Primary: the existing MediBridge AI (FastAPI -> self-hosted LLM)
- * ---------------------------------------------------------------------- */
-
-/** Pull the reply text out of whatever shape the FastAPI service returned. */
-function readReply(payload) {
-  if (typeof payload === 'string') return payload.trim() || null;
-  if (!payload || typeof payload !== 'object') return null;
-
-  for (const key of ['response', 'reply', 'answer', 'message']) {
-    const value = payload[key];
-    if (typeof value === 'string' && value.trim()) return value.trim();
-  }
-  return null;
-}
-
-/**
- * Call the primary service exactly once.
- *
- * Resolves to `{ ok: true, payload, reply }` or `{ ok: false, reason }`, where
- * `reason` is a short human sentence written for the production log rather
- * than an enum - "HTTP 404" and "timeout after 30000ms" are the difference
- * between a five-minute fix and an afternoon.
- *
- * Every failure hands over to the fallback. A dead Colab session, a rotated
- * ngrok hostname and a crashed model all look different on the wire (404 from
- * ngrok's offline page, a hung socket, a 500) and none of them is a reason to
- * leave a hospital without an answer.
- */
-async function tryPrimaryAi(message) {
-  const baseUrl = env.ai.serviceUrl;
-  if (!baseUrl) {
-    return { ok: false, reason: 'AI_SERVICE_URL is not set' };
-  }
-
-  let response;
-  let body;
-
-  try {
-    response = await fetch(`${baseUrl}/chat`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        // ngrok's free tier serves an HTML interstitial without this header.
-        'ngrok-skip-browser-warning': 'true',
-      },
-      body: JSON.stringify({ message }),
-      signal: AbortSignal.timeout(env.ai.primaryTimeoutMs),
-    });
-    body = await response.text();
-  } catch (error) {
-    const timedOut = error && (error.name === 'TimeoutError' || error.name === 'AbortError');
-    if (timedOut) return { ok: false, reason: `timeout after ${env.ai.primaryTimeoutMs}ms` };
-    return { ok: false, reason: `unreachable (${(error && error.message) || 'connection failed'})` };
-  }
-
-  if (!response.ok) {
-    // Includes ngrok's own 404 "endpoint offline" page, which is what a
-    // stopped Colab notebook actually looks like from here.
-    return { ok: false, reason: `HTTP ${response.status}` };
-  }
-
-  let payload = null;
-  try {
-    payload = body ? JSON.parse(body) : null;
-  } catch {
-    // An HTML error page or a truncated stream: unusable either way.
-    return { ok: false, reason: 'the service did not return JSON' };
-  }
-
-  // The service reporting its own failure - typically an inference exception
-  // raised inside the model call and caught by FastAPI.
-  if (payload && payload.success === false) {
-    const detail = payload.error || payload.message || 'no detail given';
-    return { ok: false, reason: `inference error (${detail})` };
-  }
-
-  const reply = readReply(payload);
-  if (!reply) return { ok: false, reason: 'empty response' };
-
-  return { ok: true, payload, reply };
-}
-
-/* -------------------------------------------------------------------------
- * 2. Database context for the fallback
+ * 1. Live database context
  * ---------------------------------------------------------------------- */
 
 const availableUnits = (row) => Math.max(0, Number(row.quantity) - Number(row.reserved_quantity));
 
 /**
- * Read the real database rows behind the question, so the fallback has facts
- * to speak from instead of a blank memory.
+ * Read the real database rows behind the question.
+ *
+ * This is the only live data the assistant has, so it is also the only thing
+ * standing between a user and a confidently invented stock figure.
  *
  * The medicine is resolved through the existing rule-based parser, which can
  * only return a row that exists in the catalogue - it cannot conjure a
@@ -218,9 +137,9 @@ async function tryDatabaseContext(message, actor = null) {
 }
 
 /**
- * The context block handed to the fallback: plain labelled lines, because the
- * model has to be able to copy figures out of it verbatim without
- * reinterpreting a nested structure.
+ * The context block handed to the model: plain labelled lines, because it has
+ * to be able to copy figures out of it verbatim without reinterpreting a
+ * nested structure.
  */
 function renderContext({ medicine, holders, totalUnits, quantity }) {
   const lines = [
@@ -255,39 +174,48 @@ function renderContext({ medicine, holders, totalUnits, quantity }) {
 }
 
 /* -------------------------------------------------------------------------
- * 3. Fallback: Google Gemini
+ * 2. Gemini
  * ---------------------------------------------------------------------- */
 
 /**
- * The fallback's whole job is to phrase facts it was given. Everything it is
- * forbidden from doing is stated as an explicit rule rather than implied,
- * because a hosted model with no tool access will otherwise fill a gap with a
- * plausible number - and a plausible inventory number is the one failure mode
- * this system cannot tolerate.
+ * Everything the model is forbidden from doing is stated as an explicit rule
+ * rather than implied, because a model with no tool access will otherwise
+ * fill a gap with a plausible number - and a plausible inventory number is
+ * the one failure mode this system cannot tolerate.
+ *
+ * Rule 3 exists because rules 1 and 2 are easy to over-apply: an assistant
+ * that answers "I cannot verify live inventory" to "how do reservations
+ * work?" is following the letter of its instructions and is useless.
  */
-const FALLBACK_SYSTEM_INSTRUCTION = [
+const SYSTEM_INSTRUCTION = [
   'You are the MediBridge assistant. MediBridge is an emergency medical supply',
   'network used by hospitals, pharmacies and suppliers to find and move stock.',
-  'You are answering because the primary MediBridge AI is temporarily',
-  'unavailable, so you have no live access to the system yourself.',
+  'You are answering inside the MediBridge web app, for a signed-in member of a',
+  'verified organisation.',
   '',
   'Rules you must follow exactly:',
   '1. Never invent or estimate inventory figures, stock levels, prices,',
-  '   supplier names, order codes, delivery times or dates. The only figures',
-  '   you may state are ones that appear verbatim in the DATABASE CONTEXT',
-  '   block of the user turn.',
-  '2. If the DATABASE CONTEXT block says live inventory is unavailable, say',
-  '   plainly that you cannot verify live inventory right now, and point the',
-  '   user at the Inventory or Search page. Never illustrate with an example',
-  '   number, and never guess.',
-  '3. Do not give clinical, dosing or treatment advice. MediBridge is a',
-  '   logistics system, not a clinical one.',
-  '4. Answer in two to four short sentences of plain English. No markdown',
+  '   supplier names, order codes, delivery times or expiry dates. The only',
+  '   such figures you may state are ones that appear verbatim in the DATABASE',
+  '   CONTEXT block of the user turn.',
+  '2. That block is the only live data you have. If it says live inventory is',
+  '   unavailable and the question is about stock, availability, suppliers,',
+  '   orders or deliveries, say plainly that you cannot verify live inventory',
+  '   right now and point the user at the Inventory or Search page. Never',
+  '   illustrate with an example number, and never guess.',
+  '3. If the question is a general one - what MediBridge does, how ordering,',
+  '   reservations or verification work, how to phrase a search - answer it',
+  '   directly and helpfully. Rule 2 is about live figures, not a reason to be',
+  '   unhelpful.',
+  '4. Do not give clinical, dosing or treatment advice. MediBridge is a',
+  '   logistics system, not a clinical one. Send clinical questions to a',
+  '   qualified clinician.',
+  '5. Answer in two to four short sentences of plain English. No markdown',
   '   headings, and no bullet lists unless you are listing organisations that',
   '   appear in the context block.',
 ].join('\n');
 
-function buildFallbackPrompt(message, context) {
+function buildPrompt(message, context) {
   return [
     'USER QUESTION:',
     message,
@@ -331,10 +259,13 @@ function readGeminiText(payload) {
 
 /**
  * Call Gemini exactly once. Resolves to `{ ok: true, reply }` or
- * `{ ok: false, reason }` - there is nothing after this step but the clean
- * error, so a failure here is terminal by design.
+ * `{ ok: false, reason }`, where `reason` is a short sentence written for
+ * whoever is reading the deploy log at the time.
+ *
+ * The key is read from the environment here and sent as a header. It is never
+ * placed in the URL, never logged, and never returned to the caller.
  */
-async function tryGeminiFallback(message, context) {
+async function askGemini(message, context) {
   if (!env.ai.geminiApiKey) {
     return { ok: false, reason: 'GEMINI_API_KEY is not set' };
   }
@@ -352,11 +283,11 @@ async function tryGeminiFallback(message, context) {
    * Gemini 2.5 thinks before it answers, and those thinking tokens are billed
    * against maxOutputTokens. A model that spends the whole budget deliberating
    * returns a candidate with no text at all and finishReason MAX_TOKENS, which
-   * this pipeline can only read as an empty response - so the request dies at
-   * the fallback and the caller gets a 503 even though the API call succeeded.
+   * reads here as an empty response - so the request dies and the caller gets
+   * a 503 even though the API call succeeded.
    *
    * Reading four labelled lines back to someone needs no deliberation, so the
-   * budget is spent on the answer instead. Sent only to 2.5, because earlier
+   * budget goes to the answer instead. Sent only to 2.5, because earlier
    * models reject the unknown field outright.
    */
   if (/2\.5/.test(env.ai.geminiModel)) {
@@ -376,16 +307,16 @@ async function tryGeminiFallback(message, context) {
         'x-goog-api-key': env.ai.geminiApiKey,
       },
       body: JSON.stringify({
-        system_instruction: { parts: [{ text: FALLBACK_SYSTEM_INSTRUCTION }] },
-        contents: [{ role: 'user', parts: [{ text: buildFallbackPrompt(message, context) }] }],
+        system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+        contents: [{ role: 'user', parts: [{ text: buildPrompt(message, context) }] }],
         generationConfig,
       }),
-      signal: AbortSignal.timeout(env.ai.fallbackTimeoutMs),
+      signal: AbortSignal.timeout(env.ai.timeoutMs),
     });
     body = await response.text();
   } catch (error) {
     const timedOut = error && (error.name === 'TimeoutError' || error.name === 'AbortError');
-    if (timedOut) return { ok: false, reason: `timeout after ${env.ai.fallbackTimeoutMs}ms` };
+    if (timedOut) return { ok: false, reason: `timeout after ${env.ai.timeoutMs}ms` };
     return { ok: false, reason: `unreachable (${(error && error.message) || 'connection failed'})` };
   }
 
@@ -424,53 +355,32 @@ async function tryGeminiFallback(message, context) {
  *
  * Returns `{ status, body }` rather than writing to the response, so the
  * controller stays a two-liner and this stays testable in isolation.
- *
- * The body keeps the FastAPI service's contract exactly - `success` and
- * `response` at the top level - so the frontend cannot tell which provider
- * answered. `provider` is metadata for logs and support, not for display.
  */
 async function chat(message, actor = null) {
-  log('Primary LLM');
-
-  const primary = await tryPrimaryAi(message);
-
-  if (primary.ok) {
-    return {
-      status: 200,
-      body: { ...primary.payload, success: true, response: primary.reply, provider: 'local' },
-    };
-  }
-
-  // Every primary failure hands over - a stopped Colab session, a rotated
-  // ngrok hostname, a 4xx, a hung socket. None of them is a reason to answer
-  // a hospital with an error when a second provider is standing by.
-  log(`Primary failed: ${primary.reason}`);
-
-  // Gemini has no tool access, so give it whatever the database can confirm.
-  // This never throws: a failed lookup produces a context-free prompt that
-  // tells the model to say it cannot verify live inventory.
+  // Never throws: a failed lookup produces a context-free prompt that tells
+  // the model to say it cannot verify live inventory.
   const context = await tryDatabaseContext(message, actor);
 
-  log(`Gemini fallback starting (model ${env.ai.geminiModel}, ${context.available ? 'with' : 'without'} database context)`);
+  log(`Gemini ${env.ai.geminiModel} (${context.available ? 'with' : 'without'} database context)`);
 
-  const fallback = await tryGeminiFallback(message, context);
+  const result = await askGemini(message, context);
 
-  if (fallback.ok) {
-    log('Gemini fallback successful');
+  if (result.ok) {
+    log('Gemini answered');
     return {
       status: 200,
-      body: { success: true, response: fallback.reply, provider: 'gemini_fallback' },
+      body: { success: true, response: result.reply, provider: 'gemini' },
     };
   }
 
-  log(`Gemini fallback failed: ${fallback.reason}`);
+  log(`Gemini failed: ${result.reason}`);
 
-  // End of the line. No third attempt, and never back to the primary.
+  // End of the line. One attempt, no retry, no second provider.
   return { status: 503, body: { success: false, message: UNAVAILABLE_MESSAGE } };
 }
 
 /**
- * Ask both providers whether they are actually working, right now, from this
+ * Ask the provider whether it is actually working, right now, from this
  * process.
  *
  * The pipeline logs say why a request failed, but only once a user has asked
@@ -483,40 +393,28 @@ async function chat(message, actor = null) {
  * nor any part of it.
  */
 async function diagnose() {
-  const [primary, fallback] = await Promise.all([
-    env.ai.serviceUrl ? tryPrimaryAi('ping') : Promise.resolve({ ok: false, reason: 'AI_SERVICE_URL is not set' }),
-    env.ai.geminiApiKey
-      ? tryGeminiFallback('Reply with the single word OK.', null)
-      : Promise.resolve({ ok: false, reason: 'GEMINI_API_KEY is not set' }),
-  ]);
+  const result = env.ai.geminiApiKey
+    ? await askGemini('Reply with the single word OK.', null)
+    : { ok: false, reason: 'GEMINI_API_KEY is not set' };
 
   return {
-    primary: {
-      configured: Boolean(env.ai.serviceUrl),
-      timeoutMs: env.ai.primaryTimeoutMs,
-      reachable: primary.ok === true,
-      reason: primary.ok ? undefined : primary.reason,
-    },
-    fallback: {
-      provider: 'gemini',
-      configured: Boolean(env.ai.geminiApiKey),
-      model: env.ai.geminiModel,
-      timeoutMs: env.ai.fallbackTimeoutMs,
-      reachable: fallback.ok === true,
-      reason: fallback.ok ? undefined : fallback.reason,
-    },
+    provider: 'gemini',
+    configured: Boolean(env.ai.geminiApiKey),
+    model: env.ai.geminiModel,
+    timeoutMs: env.ai.timeoutMs,
+    reachable: result.ok === true,
+    reason: result.ok ? undefined : result.reason,
     // What a user asking a question would get right now.
-    assistantAnswers: primary.ok === true || fallback.ok === true,
+    assistantAnswers: result.ok === true,
   };
 }
 
 module.exports = {
   chat,
   diagnose,
-  tryPrimaryAi,
   tryDatabaseContext,
-  tryGeminiFallback,
-  buildFallbackPrompt,
+  askGemini,
+  buildPrompt,
   UNAVAILABLE_MESSAGE,
   NO_CONTEXT,
 };

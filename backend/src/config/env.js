@@ -67,29 +67,23 @@ const env = {
   dispatchOverheadMinutes: num('DISPATCH_OVERHEAD_MINUTES', 8),
 
   /**
-   * The assistant. Two providers, one endpoint (POST /api/ai/chat).
-   *
-   * `serviceUrl` is the primary and stays the primary: the MediBridge FastAPI
-   * service in front of the self-hosted LLM, usually reached through an ngrok
-   * tunnel. The Gemini settings are the fallback, used only when the primary
-   * actually fails - see services/chat.service.js.
+   * The assistant behind POST /api/ai/chat. Gemini is the only provider; the
+   * self-hosted FastAPI/ngrok service is no longer in this path.
    *
    * GEMINI_API_KEY is read here and nowhere else, and is never sent to the
    * browser. It must never appear in a VITE_ prefixed variable.
    */
   ai: {
-    serviceUrl: (process.env.AI_SERVICE_URL || '').trim().replace(/\/+$/, ''),
-    // Generous on purpose: a slow answer is still the primary's answer, and
-    // the fallback must not steal a request that was merely taking its time.
-    primaryTimeoutMs: num('AI_PRIMARY_TIMEOUT_MS', 30000),
-
     geminiApiKey: (process.env.GEMINI_API_KEY || '').trim(),
     geminiModel: (process.env.GEMINI_MODEL || 'gemini-2.5-flash').trim(),
-    // Overridable so tests can point the fallback at a local stub.
+    // Overridable so tests can point the assistant at a local stub.
     geminiApiBaseUrl: (process.env.GEMINI_API_BASE_URL || 'https://generativelanguage.googleapis.com')
       .trim()
       .replace(/\/+$/, ''),
-    fallbackTimeoutMs: num('AI_FALLBACK_TIMEOUT_MS', 20000),
+    // AI_FALLBACK_TIMEOUT_MS is the name this had while Gemini was the
+    // fallback; still honoured so an existing deployment does not silently
+    // lose its setting.
+    timeoutMs: num('GEMINI_TIMEOUT_MS', num('AI_FALLBACK_TIMEOUT_MS', 20000)),
   },
 };
 
@@ -127,16 +121,11 @@ function validateEnv() {
     problems.push('JWT_SECRET must be at least 32 characters in production');
   }
 
-  // A missing assistant URL or Gemini key is a degraded assistant, not a
-  // broken API - the rest of MediBridge must still boot. Say so once, loudly
-  // enough to be noticed in a deploy log.
-  if (!isTest) {
-    if (!env.ai.serviceUrl) {
-      console.warn('[env] AI_SERVICE_URL is not set - /api/ai/chat will go straight to the fallback.');
-    }
-    if (!env.ai.geminiApiKey) {
-      console.warn('[env] GEMINI_API_KEY is not set - /api/ai/chat has no fallback provider.');
-    }
+  // A missing Gemini key is a dead assistant, not a broken API - the rest of
+  // MediBridge must still boot. Say so once, loudly enough to be noticed in a
+  // deploy log.
+  if (!isTest && !env.ai.geminiApiKey) {
+    console.warn('[env] GEMINI_API_KEY is not set - /api/ai/chat will answer 503.');
   }
 
   const weightTotal = Object.values(env.ranking).reduce((sum, w) => sum + w, 0);

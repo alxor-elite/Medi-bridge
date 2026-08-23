@@ -892,7 +892,7 @@ Requires a verified organisation.
 
 ### `POST /api/ai/chat`
 
-The assistant the frontend talks to. One endpoint, two providers behind it.
+The assistant the frontend talks to.
 
 **Body** `{ "message": "Do we have adrenaline?" }`
 
@@ -902,35 +902,50 @@ The assistant the frontend talks to. One endpoint, two providers behind it.
 {
   "success": true,
   "response": "Yes — Adrenor 1mg/ml (Adrenaline), 160 units available.",
-  "provider": "local"
+  "provider": "gemini"
 }
 ```
 
-The answer normally comes from the **primary**: the MediBridge FastAPI service
-in front of the self-hosted LLM (`AI_SERVICE_URL`), which has live tool access
-to the database. It is given `AI_PRIMARY_TIMEOUT_MS` (30s) to answer, because a
-slow answer is still the right answer.
+Google Gemini is the only provider (`GEMINI_API_KEY`, server-side only;
+`GEMINI_MODEL` defaults to `gemini-2.5-flash`). The self-hosted FastAPI/ngrok
+service is no longer in this path — the two-provider pipeline it belonged to
+is in commit `84410ef` if it is ever needed again.
 
-Only when the primary genuinely fails — unreachable, `5xx`, timeout, an
-inference exception, or an empty/unparseable body — does the request fall
-through to the **fallback**, Google Gemini (`GEMINI_API_KEY`, server-side
-only). The fallback has no tool access, so it is first handed a structured
-block of real rows read from the catalogue and inventory tables, and is
-instructed to state only figures that appear in that block. When no rows back
-the question it says it cannot verify live inventory rather than inventing one.
+Gemini has no tool access, so each request first reads the catalogue and
+inventory rows behind the question and hands the model a labelled block of
+them. It is instructed to state only figures that appear in that block. When
+no rows back the question — a general "how do reservations work?", or a
+medicine that is not in the catalogue — it is told live inventory is
+unavailable and must say so rather than inventing a number.
 
-A `4xx` from the primary is passed straight back — a rejected request is not an
-outage, and asking a second model would only hide the bug.
+`provider` is metadata for logs and support; the frontend does not surface it.
 
-`provider` is `"local"` or `"gemini_fallback"`. It is metadata for logs and
-support; the frontend does not surface it, and the response shape is identical
-either way.
-
-**Response `503`** — both providers failed. Exactly one attempt is made per
-provider, so the path is always primary → fallback → error, never a loop:
+**Response `503`** — Gemini was unreachable, timed out, returned an error, or
+returned no text. Exactly one attempt is made per request, so this cannot
+loop:
 
 ```json
 { "success": false, "message": "MediBridge AI is temporarily unavailable. Please try again shortly." }
+```
+
+### `GET /api/ai/diagnostics`
+
+Admin only. Whether the provider is answering from this process, and the exact
+reason when it is not — for diagnosing a live outage without reproducing it.
+Reports that a key is configured, never the key. Calling it makes one real
+request to Gemini.
+
+**Response `200`**
+
+```json
+{
+  "provider": "gemini",
+  "configured": true,
+  "model": "gemini-2.5-flash",
+  "timeoutMs": 20000,
+  "reachable": true,
+  "assistantAnswers": true
+}
 ```
 
 ### `POST /api/ai/parse-request`
