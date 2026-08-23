@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Search, CornerDownLeft, AlertTriangle, RotateCcw, Clock, Database } from 'lucide-react'
+import { Link } from 'react-router-dom'
+import {
+  Search,
+  SearchX,
+  CornerDownLeft,
+  AlertTriangle,
+  RotateCcw,
+  Clock,
+  Database,
+  ArrowUpRight,
+} from 'lucide-react'
 import { Button } from '../../components/ui/Button'
 import { Skeleton } from '../../components/ui/Skeleton'
 import { Reveal } from '../../components/ui/Reveal'
@@ -101,8 +111,49 @@ function extractRows(text) {
   return bulleted.map((line) => {
     const body = line.replace(/^([-*•]|\d+[.)])\s+/, '')
     const split = body.match(/^(.+?)\s*[:—–-]\s*(.+)$/)
-    return split ? { label: split[1].trim(), value: split[2].trim() } : { label: body, value: null }
+    const label = (split ? split[1] : body).trim()
+    const value = split ? split[2].trim() : null
+
+    // Pull the figures the line states so the list can be columned. Anything
+    // absent stays absent - the column is dropped rather than guessed at.
+    const available = value?.match(/(\d[\d,]*)\s*(units?|vials?|boxes|packs?|cylinders?)\b/i)
+    const threshold = value?.match(/threshold\s*(?:of\s*)?(\d[\d,]*)/i)
+
+    const toNum = (m, i = 1) => (m ? Number(m[i].replace(/,/g, '')) : null)
+
+    return {
+      label,
+      value,
+      available: toNum(available),
+      availableUnit: available ? available[2].toLowerCase() : null,
+      threshold: toNum(threshold),
+    }
   })
+}
+
+/**
+ * Status for a row, from arithmetic on the two figures the answer itself
+ * stated. Nothing is derived when either number is missing.
+ */
+function rowStatus(row) {
+  if (row.available == null) return null
+  if (row.available === 0) return { label: 'Out', tone: 'danger' }
+  if (row.threshold == null) return null
+  return row.available < row.threshold
+    ? { label: 'Low', tone: 'warning' }
+    : { label: 'OK', tone: 'success' }
+}
+
+/**
+ * True when the answer reports an absence. Deliberately narrow: it must both
+ * read as a negative and carry no quantity, so "we have 0 units" or a normal
+ * positive answer is never mistaken for an empty result.
+ */
+const NEGATIVE = /\b(no|not|none|n't|unable|cannot|couldn't|could not)\b[^.]{0,40}\b(match|found|find|have|available|stock|record|result|suppl|order)/i
+
+function isNoResult(text, facts, rows) {
+  if (rows.length > 0 || facts.quantity != null) return false
+  return NEGATIVE.test(text)
 }
 
 /** The prose minus any bulleted lines, so the summary is not repeated below. */
@@ -165,9 +216,11 @@ export default function Assistant() {
           // Facts come from the prose only: a figure lifted out of one row of a
           // list is not a headline figure for the answer as a whole.
           facts: extractFacts(leadParagraph(answer)),
+          empty: false,
           tookMs: Date.now() - startedAt,
           at: new Date(),
         }
+        entry.empty = isNoResult(answer, entry.facts, entry.rows)
         setResults((prev) => [entry, ...prev])
         setActiveId(entry.id)
       } catch (err) {
@@ -429,8 +482,21 @@ function ErrorPanel({ error, onRetry }) {
  * Result
  * ------------------------------------------------------------------ */
 
+/** Question words stripped, so the panel is titled by its subject. */
+function subjectOf(result) {
+  if (result.facts.product) return result.facts.product
+  if (result.facts.orderCode) return result.facts.orderCode
+  const cleaned = result.query
+    .replace(/^\s*(do|does|did)\s+we\s+have\s+/i, '')
+    .replace(/^\s*(show|find|list|get|track|search( for)?)\s+(me\s+)?/i, '')
+    .replace(/^\s*(where\s+is|what\s+is|which|who|how\s+much|how\s+many|is\s+there|are\s+there)\s+/i, '')
+    .replace(/\?+\s*$/, '')
+    .trim()
+  return cleaned || result.query
+}
+
 function ResultPanel({ result }) {
-  const { query, answer, facts, rows, lead, tookMs } = result
+  const { query, answer, facts, rows, lead, tookMs, empty } = result
   // A per-item summary strip alongside a multi-item list would present one
   // row's numbers as though they described the whole answer, so it is shown
   // only when the answer is about a single subject.
@@ -438,89 +504,212 @@ function ResultPanel({ result }) {
     rows.length === 0 &&
     Boolean(facts.status || facts.quantity != null || facts.product || facts.orderCode || facts.price)
 
+  const subject = subjectOf(result)
+
   return (
     <Reveal>
       <Panel className="overflow-hidden">
-        {/* Query line */}
-        <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-3">
-          <p className="min-w-0 truncate text-sm font-medium text-slate-900">{query}</p>
-          <span className="shrink-0 text-xs tabular-nums text-slate-400">
+        {/* Subject leads; the query it came from stays visible but secondary. */}
+        <div className="flex items-start justify-between gap-3 border-b border-slate-100 px-5 py-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-semibold uppercase tracking-wide text-slate-900">
+              {subject}
+            </h2>
+            <p className="mt-0.5 truncate text-xs text-slate-400">{query}</p>
+          </div>
+          <span className="shrink-0 pt-0.5 text-xs tabular-nums text-slate-400">
             {(tookMs / 1000).toFixed(1)}s
           </span>
         </div>
 
-        {/* Natural-language answer, marked as the AI's own words */}
-        <div className="border-l-2 px-5 py-4" style={{ borderColor: ACCENT }}>
-          <p className="text-[15px] leading-relaxed text-slate-800">{lead || answer}</p>
-        </div>
+        {empty ? (
+          <NoResults answer={lead || answer} />
+        ) : (
+          <>
+            {/* Natural-language answer, marked as the AI's own words */}
+            <div className="border-l-2 px-5 py-4" style={{ borderColor: ACCENT }}>
+              <p className="text-[15px] leading-relaxed text-slate-800">{lead || answer}</p>
+            </div>
 
-        {/* Structured summary — every value below appears verbatim in the answer */}
-        {hasSummary && (
-          // flex-wrap rather than a fixed grid: the strip fills the row whatever
-          // number of facts the answer happened to contain.
-          <dl className="flex flex-wrap gap-px border-t border-slate-100 bg-slate-100">
-            {facts.product && <Cell label="Item" value={facts.product} />}
-            {facts.quantity != null && (
-              <Cell
-                label="Quantity"
-                value={
-                  <span style={{ color: ACCENT }}>
-                    {/* Rendered outright, not counted up: a quantity that reads
-                        0 mid-animation is worse than no animation at all, and
-                        rAF is throttled in background tabs. */}
-                    {facts.quantity.toLocaleString('en-IN')}{' '}
-                    <span className="text-sm font-medium text-slate-500">{facts.quantityUnit}</span>
-                  </span>
-                }
-                emphasis
-              />
+            {/* Structured summary - every value below appears verbatim in the answer */}
+            {hasSummary && (
+              <dl className="flex flex-wrap gap-px border-t border-slate-100 bg-slate-100">
+                {facts.product && <Cell label="Item" value={facts.product} />}
+                {facts.quantity != null && (
+                  <Cell
+                    label="Quantity"
+                    value={
+                      <span style={{ color: ACCENT }}>
+                        {/* Rendered outright, not counted up: a quantity that reads
+                            0 mid-animation is worse than no animation at all, and
+                            rAF is throttled in background tabs. */}
+                        {facts.quantity.toLocaleString('en-IN')}{' '}
+                        <span className="text-sm font-medium text-slate-500">
+                          {facts.quantityUnit}
+                        </span>
+                      </span>
+                    }
+                    emphasis
+                  />
+                )}
+                {facts.status && (
+                  <Cell
+                    label="Status"
+                    value={<StatusTag label={facts.status.label} tone={facts.status.tone} />}
+                  />
+                )}
+                {facts.orderCode && <Cell label="Order" value={facts.orderCode} mono />}
+                {facts.price && <Cell label="Price" value={facts.price} />}
+              </dl>
             )}
-            {facts.status && (
-              <Cell
-                label="Status"
-                value={
-                  <span
-                    className={cn(
-                      'inline-flex items-center rounded-md px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ring-1 ring-inset',
-                      TONE_STYLES[facts.status.tone],
-                    )}
-                  >
-                    {facts.status.label}
-                  </span>
-                }
-              />
-            )}
-            {facts.orderCode && <Cell label="Order" value={facts.orderCode} mono />}
-            {facts.price && <Cell label="Price" value={facts.price} />}
-          </dl>
+
+            {rows.length > 0 && <ResultTable rows={rows} />}
+          </>
         )}
 
-        {/* Enumerated answers become rows */}
-        {rows.length > 0 && (
-          <div className="border-t border-slate-100">
-            <table className="w-full text-sm">
-              <tbody className="divide-y divide-slate-100">
-                {rows.map((row, i) => (
-                  <tr key={`${row.label}-${i}`} className="transition-colors hover:bg-slate-50">
-                    <td className="px-5 py-2.5 text-slate-700">{row.label}</td>
-                    {row.value && (
-                      <td className="px-5 py-2.5 text-right font-medium tabular-nums text-slate-900">
-                        {row.value}
-                      </td>
-                    )}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        <div className="flex items-center gap-1.5 border-t border-slate-100 bg-slate-50/60 px-5 py-2.5">
-          <Database className="size-3.5 text-slate-400" aria-hidden="true" />
-          <span className="text-xs text-slate-500">Source: MediBridge inventory</span>
-        </div>
+        <ResultFooter facts={facts} empty={empty} />
       </Panel>
     </Reveal>
+  )
+}
+
+function StatusTag({ label, tone }) {
+  return (
+    <span
+      className={cn(
+        'inline-flex items-center rounded-md px-2 py-0.5 text-xs font-semibold uppercase tracking-wide ring-1 ring-inset',
+        TONE_STYLES[tone],
+      )}
+    >
+      {label}
+    </span>
+  )
+}
+
+/**
+ * Enumerated answers become a real table. A column appears only when at least
+ * one row actually stated that figure.
+ */
+function ResultTable({ rows }) {
+  const showAvailable = rows.some((r) => r.available != null)
+  const showThreshold = rows.some((r) => r.threshold != null)
+  const statuses = rows.map(rowStatus)
+  const showStatus = statuses.some(Boolean)
+  const plain = !showAvailable && !showThreshold && !showStatus
+  const unit = rows.find((r) => r.availableUnit)?.availableUnit || 'units'
+
+  return (
+    <div className="overflow-x-auto border-t border-slate-100">
+      <table className="w-full min-w-[30rem] text-sm">
+        <thead>
+          <tr className="border-b border-slate-100 bg-slate-50/60 text-left">
+            <Th>Medicine</Th>
+            {showAvailable && <Th align="right">Available</Th>}
+            {showThreshold && <Th align="right">Threshold</Th>}
+            {showStatus && <Th>Status</Th>}
+            {plain && <Th align="right">Detail</Th>}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-100">
+          {rows.map((row, i) => (
+            <tr key={`${row.label}-${i}`} className="transition-colors hover:bg-slate-50">
+              <td className="px-5 py-2.5 font-medium text-slate-900">{row.label}</td>
+              {showAvailable && (
+                <td className="px-5 py-2.5 text-right tabular-nums text-slate-700">
+                  {row.available != null ? `${row.available.toLocaleString('en-IN')} ${unit}` : '\u2014'}
+                </td>
+              )}
+              {showThreshold && (
+                <td className="px-5 py-2.5 text-right tabular-nums text-slate-500">
+                  {row.threshold != null ? `${row.threshold.toLocaleString('en-IN')} ${unit}` : '\u2014'}
+                </td>
+              )}
+              {showStatus && (
+                <td className="px-5 py-2.5">
+                  {statuses[i] ? (
+                    <StatusTag label={statuses[i].label} tone={statuses[i].tone} />
+                  ) : (
+                    <span className="text-slate-300">{'\u2014'}</span>
+                  )}
+                </td>
+              )}
+              {plain && <td className="px-5 py-2.5 text-right text-slate-700">{row.value || '\u2014'}</td>}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+function Th({ children, align = 'left' }) {
+  return (
+    <th
+      scope="col"
+      className={cn(
+        'px-5 py-2 text-[11px] font-medium uppercase tracking-wide text-slate-400',
+        align === 'right' && 'text-right',
+      )}
+    >
+      {children}
+    </th>
+  )
+}
+
+function NoResults({ answer }) {
+  return (
+    <div className="px-5 py-6">
+      <div className="flex gap-3">
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-400">
+          <SearchX className="size-4" aria-hidden="true" />
+        </span>
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-slate-900">No matching records</p>
+          <p className="mt-1 text-sm text-slate-600">{answer}</p>
+          <p className="mt-2 text-xs text-slate-400">
+            Try a medicine name, a supplier, or an order code such as MB-DEMO-0001.
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
+ * Source line, plus a way through to the workspace that owns the record.
+ * These navigate to the relevant list rather than deep-linking: the assistant
+ * answers with names and codes, not the internal ids those routes need, so a
+ * deep link would land on a missing record.
+ */
+function ResultFooter({ facts, empty }) {
+  const showActions = !empty && (facts.orderCode || facts.product)
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 bg-slate-50/60 px-5 py-2.5">
+      <span className="flex items-center gap-1.5">
+        <Database className="size-3.5 text-slate-400" aria-hidden="true" />
+        <span className="text-xs text-slate-500">Source: MediBridge inventory</span>
+      </span>
+
+      {showActions && (
+        <span className="flex items-center gap-2">
+          {facts.orderCode && <FooterLink to="/hospital/orders">View in orders</FooterLink>}
+          {facts.product && <FooterLink to="/hospital/search">Find suppliers</FooterLink>}
+        </span>
+      )}
+    </div>
+  )
+}
+
+function FooterLink({ to, children }) {
+  return (
+    <Link
+      to={to}
+      className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs font-medium text-slate-600 transition-colors hover:border-slate-300 hover:text-slate-900"
+    >
+      {children}
+      <ArrowUpRight className="size-3" aria-hidden="true" />
+    </Link>
   )
 }
 
