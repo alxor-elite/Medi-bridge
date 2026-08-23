@@ -6,6 +6,7 @@ const http = require('node:http');
 
 const { startTestServer, createActor, createMedicine, createInventory } = require('./helpers');
 const { env } = require('../src/config/env');
+const chatService = require('../src/services/chat.service');
 const { ROLES } = require('../src/config/constants');
 
 /**
@@ -132,6 +133,7 @@ test.beforeEach(() => {
   env.ai.serviceUrl = primary.url;
   env.ai.geminiApiBaseUrl = gemini.url;
   env.ai.geminiApiKey = 'test-key-never-leaves-the-server';
+  env.ai.geminiModel = 'gemini-2.5-flash';
 });
 
 const ask = (text, token = hospital.token) => client.post('/api/ai/chat', { message: text }, { token });
@@ -300,19 +302,120 @@ test('a fallback that returns no candidate text is a failure, not an empty answe
   assert.equal(response.body.message, 'MediBridge AI is temporarily unavailable. Please try again shortly.');
 });
 
+test('a Gemini API error is reported by reason, not swallowed as a status code', async () => {
+  primary.use((req, res) => json(res, 500, { detail: 'down' }));
+  gemini.use((req, res) =>
+    json(res, 400, { error: { code: 400, status: 'INVALID_ARGUMENT', message: 'API key not valid.' } })
+  );
+
+  const response = await ask('Do we have adrenaline?');
+  assert.equal(response.status, 503);
+
+  // The operator-facing reason has to name the cause; the caller-facing body
+  // must not leak it.
+  const direct = await chatService.tryGeminiFallback('hello', null);
+  assert.equal(direct.ok, false);
+  assert.match(direct.reason, /API key not valid/);
+  assert.match(direct.reason, /INVALID_ARGUMENT/);
+  assert.doesNotMatch(JSON.stringify(response.body), /API key/);
+});
+
+test('diagnostics reports each provider and never echoes the key', async () => {
+  primary.use((req, res) => json(res, 500, { detail: 'model not loaded' }));
+
+  const admin = await createActor({ role: ROLES.ADMIN, client });
+  const response = await client.get('/api/ai/diagnostics', { token: admin.token });
+
+  assert.equal(response.status, 200);
+  const { primary: p, fallback: f, assistantAnswers } = response.body.data;
+
+  assert.equal(p.configured, true);
+  assert.equal(p.reachable, false);
+  assert.match(p.reason, /HTTP 500/);
+
+  assert.equal(f.configured, true);
+  assert.equal(f.model, 'gemini-2.5-flash');
+  assert.equal(f.reachable, true);
+  assert.equal(assistantAnswers, true, 'the assistant still answers via the fallback');
+
+  assert.doesNotMatch(JSON.stringify(response.body), /test-key-never-leaves-the-server/);
+});
+
+test('diagnostics is admin only', async () => {
+  const response = await client.get('/api/ai/diagnostics', { token: hospital.token });
+  assert.equal(response.status, 403);
+});
+
 /* ------------------------------------------------------------------ *
  * Guard rails
  * ------------------------------------------------------------------ */
 
-test('a 4xx from the primary is passed back, not papered over by the fallback', async () => {
-  primary.use((req, res) => json(res, 400, { success: false, message: 'Message too long.' }));
+test('a 4xx from the primary still hands over - a dead tunnel answers 404', async () => {
+  // ngrok serves its own 404 "endpoint offline" page when the Colab notebook
+  // behind the tunnel has stopped, which is the commonest way this fails.
+  primary.use((req, res) => {
+    res.writeHead(404, { 'Content-Type': 'text/html' });
+    res.end('<html>ERR_NGROK_3200: endpoint offline</html>');
+  });
 
   const response = await ask('Do we have adrenaline?');
 
-  assert.equal(response.status, 400);
-  assert.equal(response.body.success, false);
-  assert.equal(response.body.message, 'Message too long.');
-  assert.equal(gemini.calls.length, 0, 'a bad request is not an outage');
+  assert.equal(response.status, 200);
+  assert.equal(response.body.provider, 'gemini_fallback');
+  assert.equal(gemini.calls.length, 1);
+});
+
+test('an unconfigured primary goes straight to Gemini rather than failing', async () => {
+  // Requirement: the fallback must not depend on AI_SERVICE_URL being set.
+  env.ai.serviceUrl = '';
+
+  const response = await ask('Do we have adrenaline?');
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.provider, 'gemini_fallback');
+  assert.equal(primary.calls.length, 0, 'nothing to call');
+  assert.equal(gemini.calls.length, 1);
+});
+
+test('Gemini 2.5 is told not to spend its output budget thinking', async () => {
+  // 2.5 bills thinking tokens against maxOutputTokens; a model that thinks
+  // through the whole budget returns no text and drops the request.
+  primary.use((req, res) => json(res, 500, { detail: 'down' }));
+  env.ai.geminiModel = 'gemini-2.5-flash';
+
+  await ask('Do we have adrenaline?');
+
+  const config = gemini.calls[0].body.generationConfig;
+  assert.deepEqual(config.thinkingConfig, { thinkingBudget: 0 });
+  assert.equal(config.maxOutputTokens, 1024);
+});
+
+test('a model that is not 2.5 is not sent a field it would reject', async () => {
+  primary.use((req, res) => json(res, 500, { detail: 'down' }));
+  env.ai.geminiModel = 'gemini-2.0-flash';
+
+  try {
+    await ask('Do we have adrenaline?');
+    assert.equal(gemini.calls[0].body.generationConfig.thinkingConfig, undefined);
+  } finally {
+    env.ai.geminiModel = 'gemini-2.5-flash';
+  }
+});
+
+test('the model defaults to gemini-2.5-flash and the key comes from the environment', async () => {
+  // These tests mutate the shared env object, so read the shipped defaults
+  // from a clean load of the config and put the cache back afterwards.
+  const modulePath = require.resolve('../src/config/env');
+  const cached = require.cache[modulePath];
+  delete require.cache[modulePath];
+
+  try {
+    const fresh = require('../src/config/env').env;
+    assert.equal(fresh.ai.geminiModel, 'gemini-2.5-flash');
+    assert.equal(fresh.ai.geminiApiKey, (process.env.GEMINI_API_KEY || '').trim());
+  } finally {
+    require.cache[modulePath] = cached;
+  }
 });
 
 test('the assistant requires a session, like every other AI route', async () => {

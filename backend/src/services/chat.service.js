@@ -43,12 +43,19 @@ const NO_CONTEXT =
   'Live inventory is unavailable. No database figures could be read for this question.';
 
 /**
- * Pipeline tracing, development only. Production logs stay quiet and test
- * output stays readable.
+ * Pipeline logging.
+ *
+ * These lines are operational, not debug. When the assistant fails on a
+ * deployed instance they are the only record of which provider dropped the
+ * request and why, so they are printed in production too - a silent pipeline
+ * is exactly what makes a 503 impossible to diagnose from a hosting log.
+ * Only the test run is quiet, to keep its output readable.
+ *
+ * Never pass a key, a token or a full prompt through here.
  */
-function trace(...parts) {
-  if (env.isProduction || env.isTest) return;
-  console.info('[AI]', ...parts);
+function log(line) {
+  if (env.isTest) return;
+  console.log(`[AI] ${line}`);
 }
 
 /* -------------------------------------------------------------------------
@@ -70,15 +77,20 @@ function readReply(payload) {
 /**
  * Call the primary service exactly once.
  *
- * Resolves to `{ ok: true, payload, reply }`, or `{ ok: false, reason }` where
- * every reason except CLIENT_ERROR is a genuine outage and therefore a
- * fallback trigger. A 4xx means the request itself was wrong; re-asking a
- * different model would only hide the bug, so it is passed straight back.
+ * Resolves to `{ ok: true, payload, reply }` or `{ ok: false, reason }`, where
+ * `reason` is a short human sentence written for the production log rather
+ * than an enum - "HTTP 404" and "timeout after 30000ms" are the difference
+ * between a five-minute fix and an afternoon.
+ *
+ * Every failure hands over to the fallback. A dead Colab session, a rotated
+ * ngrok hostname and a crashed model all look different on the wire (404 from
+ * ngrok's offline page, a hung socket, a 500) and none of them is a reason to
+ * leave a hospital without an answer.
  */
 async function tryPrimaryAi(message) {
   const baseUrl = env.ai.serviceUrl;
   if (!baseUrl) {
-    return { ok: false, reason: 'NOT_CONFIGURED', detail: 'AI_SERVICE_URL is not set.' };
+    return { ok: false, reason: 'AI_SERVICE_URL is not set' };
   }
 
   let response;
@@ -99,17 +111,14 @@ async function tryPrimaryAi(message) {
     body = await response.text();
   } catch (error) {
     const timedOut = error && (error.name === 'TimeoutError' || error.name === 'AbortError');
-    return {
-      ok: false,
-      reason: timedOut ? 'TIMEOUT' : 'UNREACHABLE',
-      detail: timedOut ? `no answer within ${env.ai.primaryTimeoutMs}ms` : error && error.message,
-    };
+    if (timedOut) return { ok: false, reason: `timeout after ${env.ai.primaryTimeoutMs}ms` };
+    return { ok: false, reason: `unreachable (${(error && error.message) || 'connection failed'})` };
   }
 
-  // 408 and 429 are the service saying it cannot serve this request now, which
-  // is an availability problem rather than a malformed request.
-  if (response.status >= 500 || response.status === 408 || response.status === 429) {
-    return { ok: false, reason: 'SERVER_ERROR', status: response.status };
+  if (!response.ok) {
+    // Includes ngrok's own 404 "endpoint offline" page, which is what a
+    // stopped Colab notebook actually looks like from here.
+    return { ok: false, reason: `HTTP ${response.status}` };
   }
 
   let payload = null;
@@ -117,29 +126,18 @@ async function tryPrimaryAi(message) {
     payload = body ? JSON.parse(body) : null;
   } catch {
     // An HTML error page or a truncated stream: unusable either way.
-    if (!response.ok) {
-      return { ok: false, reason: 'SERVER_ERROR', status: response.status };
-    }
-    return { ok: false, reason: 'INVALID_RESPONSE', detail: 'the service did not return JSON' };
-  }
-
-  if (!response.ok) {
-    return {
-      ok: false,
-      reason: 'CLIENT_ERROR',
-      status: response.status,
-      message: readReply(payload) || 'The assistant could not answer that.',
-    };
+    return { ok: false, reason: 'the service did not return JSON' };
   }
 
   // The service reporting its own failure - typically an inference exception
   // raised inside the model call and caught by FastAPI.
   if (payload && payload.success === false) {
-    return { ok: false, reason: 'INFERENCE_ERROR', detail: payload.error || payload.message };
+    const detail = payload.error || payload.message || 'no detail given';
+    return { ok: false, reason: `inference error (${detail})` };
   }
 
   const reply = readReply(payload);
-  if (!reply) return { ok: false, reason: 'EMPTY_RESPONSE' };
+  if (!reply) return { ok: false, reason: 'empty response' };
 
   return { ok: true, payload, reply };
 }
@@ -214,7 +212,7 @@ async function tryDatabaseContext(message, actor = null) {
       summary: renderContext({ medicine, holders, totalUnits, quantity: parsed.quantity }),
     };
   } catch (error) {
-    trace('Database context lookup failed:', error && error.message);
+    log(`Database context unavailable: ${(error && error.message) || 'lookup failed'}`);
     return { available: false, reason: 'LOOKUP_FAILED' };
   }
 }
@@ -299,6 +297,25 @@ function buildFallbackPrompt(message, context) {
   ].join('\n');
 }
 
+/**
+ * Turn a Gemini error body into one line for the log.
+ *
+ * The API puts the actionable part in `error.message` - "API key not valid",
+ * "quota exceeded", "model not found" are all things an operator can fix in a
+ * minute, and all things a bare status code hides.
+ */
+function describeGeminiError(status, body) {
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && parsed.error) {
+      return `HTTP ${status} ${parsed.error.status || ''} - ${parsed.error.message}`.replace(/\s+/g, ' ').trim();
+    }
+  } catch {
+    /* not JSON - fall through to the raw body */
+  }
+  return `HTTP ${status} - ${typeof body === 'string' ? body.slice(0, 200) : 'no body'}`;
+}
+
 /** Concatenate the text parts of the first candidate. */
 function readGeminiText(payload) {
   const parts = payload && payload.candidates && payload.candidates[0]
@@ -319,11 +336,32 @@ function readGeminiText(payload) {
  */
 async function tryGeminiFallback(message, context) {
   if (!env.ai.geminiApiKey) {
-    return { ok: false, reason: 'NOT_CONFIGURED', detail: 'GEMINI_API_KEY is not set.' };
+    return { ok: false, reason: 'GEMINI_API_KEY is not set' };
   }
 
   const model = encodeURIComponent(env.ai.geminiModel);
   const url = `${env.ai.geminiApiBaseUrl}/v1beta/models/${model}:generateContent`;
+
+  const generationConfig = {
+    // Low temperature: this is a rephrasing job, not a creative one.
+    temperature: 0.2,
+    maxOutputTokens: 1024,
+  };
+
+  /*
+   * Gemini 2.5 thinks before it answers, and those thinking tokens are billed
+   * against maxOutputTokens. A model that spends the whole budget deliberating
+   * returns a candidate with no text at all and finishReason MAX_TOKENS, which
+   * this pipeline can only read as an empty response - so the request dies at
+   * the fallback and the caller gets a 503 even though the API call succeeded.
+   *
+   * Reading four labelled lines back to someone needs no deliberation, so the
+   * budget is spent on the answer instead. Sent only to 2.5, because earlier
+   * models reject the unknown field outright.
+   */
+  if (/2\.5/.test(env.ai.geminiModel)) {
+    generationConfig.thinkingConfig = { thinkingBudget: 0 };
+  }
 
   let response;
   let body;
@@ -340,45 +378,38 @@ async function tryGeminiFallback(message, context) {
       body: JSON.stringify({
         system_instruction: { parts: [{ text: FALLBACK_SYSTEM_INSTRUCTION }] },
         contents: [{ role: 'user', parts: [{ text: buildFallbackPrompt(message, context) }] }],
-        generationConfig: {
-          // Low temperature: this is a rephrasing job, not a creative one.
-          temperature: 0.2,
-          maxOutputTokens: 2048,
-        },
+        generationConfig,
       }),
       signal: AbortSignal.timeout(env.ai.fallbackTimeoutMs),
     });
     body = await response.text();
   } catch (error) {
     const timedOut = error && (error.name === 'TimeoutError' || error.name === 'AbortError');
-    return {
-      ok: false,
-      reason: timedOut ? 'TIMEOUT' : 'UNREACHABLE',
-      detail: error && error.message,
-    };
+    if (timedOut) return { ok: false, reason: `timeout after ${env.ai.fallbackTimeoutMs}ms` };
+    return { ok: false, reason: `unreachable (${(error && error.message) || 'connection failed'})` };
   }
 
   if (!response.ok) {
-    return {
-      ok: false,
-      reason: 'HTTP_ERROR',
-      status: response.status,
-      detail: typeof body === 'string' ? body.slice(0, 300) : undefined,
-    };
+    return { ok: false, reason: describeGeminiError(response.status, body) };
   }
 
   let payload;
   try {
     payload = JSON.parse(body);
   } catch {
-    return { ok: false, reason: 'INVALID_RESPONSE' };
+    return { ok: false, reason: 'the API did not return JSON' };
   }
 
-  // A safety block comes back as 200 with no candidate text.
+  // A safety block, or a budget spent on thinking, comes back as 200 with no
+  // candidate text. Name which one it was.
   const reply = readGeminiText(payload);
   if (!reply) {
     const blocked = payload && payload.promptFeedback && payload.promptFeedback.blockReason;
-    return { ok: false, reason: blocked ? 'BLOCKED' : 'EMPTY_RESPONSE' };
+    if (blocked) return { ok: false, reason: `blocked by safety filter (${blocked})` };
+
+    const candidate = payload && payload.candidates && payload.candidates[0];
+    const finish = candidate && candidate.finishReason;
+    return { ok: false, reason: finish ? `no text returned (finishReason ${finish})` : 'no text returned' };
   }
 
   return { ok: true, reply };
@@ -399,7 +430,7 @@ async function tryGeminiFallback(message, context) {
  * answered. `provider` is metadata for logs and support, not for display.
  */
 async function chat(message, actor = null) {
-  trace('Primary LLM');
+  log('Primary LLM');
 
   const primary = await tryPrimaryAi(message);
 
@@ -410,39 +441,78 @@ async function chat(message, actor = null) {
     };
   }
 
-  // A rejected request is not an outage. Hand the primary's own answer back
-  // rather than asking a second model the same bad question.
-  if (primary.reason === 'CLIENT_ERROR') {
-    return {
-      status: primary.status,
-      body: { success: false, message: primary.message, provider: 'local' },
-    };
-  }
-
-  trace('Primary failed', `(${primary.reason}${primary.detail ? `: ${primary.detail}` : ''})`);
+  // Every primary failure hands over - a stopped Colab session, a rotated
+  // ngrok hostname, a 4xx, a hung socket. None of them is a reason to answer
+  // a hospital with an error when a second provider is standing by.
+  log(`Primary failed: ${primary.reason}`);
 
   // Gemini has no tool access, so give it whatever the database can confirm.
+  // This never throws: a failed lookup produces a context-free prompt that
+  // tells the model to say it cannot verify live inventory.
   const context = await tryDatabaseContext(message, actor);
-  trace('Using Gemini fallback', context.available ? 'with database context' : 'without database context');
+
+  log(`Gemini fallback starting (model ${env.ai.geminiModel}, ${context.available ? 'with' : 'without'} database context)`);
 
   const fallback = await tryGeminiFallback(message, context);
 
   if (fallback.ok) {
-    trace('Fallback successful');
+    log('Gemini fallback successful');
     return {
       status: 200,
       body: { success: true, response: fallback.reply, provider: 'gemini_fallback' },
     };
   }
 
-  trace('Fallback failed', `(${fallback.reason})`);
+  log(`Gemini fallback failed: ${fallback.reason}`);
 
   // End of the line. No third attempt, and never back to the primary.
   return { status: 503, body: { success: false, message: UNAVAILABLE_MESSAGE } };
 }
 
+/**
+ * Ask both providers whether they are actually working, right now, from this
+ * process.
+ *
+ * The pipeline logs say why a request failed, but only once a user has asked
+ * something. This answers the same question on demand, which is what you want
+ * when a deploy is live and the assistant is down: it separates "the key is
+ * missing" from "the key is wrong" from "the model name is wrong" without
+ * anyone having to reproduce the failure.
+ *
+ * Admin only, and it reports whether a key is present - never the key itself,
+ * nor any part of it.
+ */
+async function diagnose() {
+  const [primary, fallback] = await Promise.all([
+    env.ai.serviceUrl ? tryPrimaryAi('ping') : Promise.resolve({ ok: false, reason: 'AI_SERVICE_URL is not set' }),
+    env.ai.geminiApiKey
+      ? tryGeminiFallback('Reply with the single word OK.', null)
+      : Promise.resolve({ ok: false, reason: 'GEMINI_API_KEY is not set' }),
+  ]);
+
+  return {
+    primary: {
+      configured: Boolean(env.ai.serviceUrl),
+      timeoutMs: env.ai.primaryTimeoutMs,
+      reachable: primary.ok === true,
+      reason: primary.ok ? undefined : primary.reason,
+    },
+    fallback: {
+      provider: 'gemini',
+      configured: Boolean(env.ai.geminiApiKey),
+      model: env.ai.geminiModel,
+      timeoutMs: env.ai.fallbackTimeoutMs,
+      reachable: fallback.ok === true,
+      reason: fallback.ok ? undefined : fallback.reason,
+    },
+    // What a user asking a question would get right now.
+    assistantAnswers: primary.ok === true || fallback.ok === true,
+  };
+}
+
 module.exports = {
   chat,
+  diagnose,
   tryPrimaryAi,
   tryDatabaseContext,
   tryGeminiFallback,

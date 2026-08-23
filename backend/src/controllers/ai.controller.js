@@ -89,4 +89,14 @@ const chat = asyncHandler(async (req, res) => {
   return res.status(status).json(body);
 });
 
-module.exports = { parseRequest, emergencySearch, shortageForecast, chat };
+/**
+ * GET /api/ai/diagnostics
+ * Whether each provider is answering from this process, and the exact reason
+ * when one is not. Admin only; reports that a key is configured, never the
+ * key. Calling it makes one real request to each provider.
+ */
+const diagnostics = asyncHandler(async (req, res) => {
+  return sendSuccess(res, await chatService.diagnose());
+});
+
+module.exports = { parseRequest, emergencySearch, shortageForecast, chat, diagnostics };

@@ -5,7 +5,8 @@ const { body, query } = require('express-validator');
 
 const controller = require('../controllers/ai.controller');
 const validate = require('../middleware/validate');
-const { requireAuth, requireVerifiedOrganization } = require('../middleware/auth');
+const { requireAuth, requireRole, requireVerifiedOrganization } = require('../middleware/auth');
+const { ROLES } = require('../config/constants');
 
 const router = express.Router();
 
@@ -23,6 +24,9 @@ router.post(
   validate,
   controller.chat
 );
+
+/** Provider health, for diagnosing a live outage. Admin only. */
+router.get('/diagnostics', requireRole(ROLES.ADMIN), controller.diagnostics);
 
 router.post(
   '/parse-request',
